@@ -15,9 +15,6 @@
 
 package com.baidu.palo.qe;
 
-import java.nio.channels.SocketChannel;
-import java.util.List;
-
 import com.baidu.palo.catalog.Catalog;
 import com.baidu.palo.cluster.ClusterNamespace;
 import com.baidu.palo.mysql.MysqlCapability;
@@ -32,6 +29,9 @@ import com.google.common.collect.Lists;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.nio.channels.SocketChannel;
+import java.util.List;
+
 // When one client connect in, we create a connect context for it.
 // We store session information here. Meanwhile ConnectScheduler all
 // connect with its connection id.
@@ -39,6 +39,9 @@ import org.apache.logging.log4j.Logger;
 public class ConnectContext {
     private static final Logger LOG = LogManager.getLogger(ConnectContext.class);
     private static ThreadLocal<ConnectContext> threadLocalInfo = new ThreadLocal<ConnectContext>();
+
+    // set this id before analyze
+    private volatile long stmtId;
 
     private volatile TUniqueId queryId;
     // id for this connection
@@ -59,7 +62,7 @@ public class ConnectContext {
     // cluster name
     private volatile String clusterName = "";
     // User
-    private volatile String user;
+    private volatile String qualifiedUser;
     // Serializer used to pack MySQL packet.
     private volatile MysqlSerializer serializer;
     // Variables belong to this session.
@@ -81,6 +84,8 @@ public class ConnectContext {
     private boolean isSend;
 
     private AuditBuilder auditBuilder;
+
+    private String remoteIP;
 
     public static ConnectContext get() {
         return threadLocalInfo.get();
@@ -108,6 +113,25 @@ public class ConnectContext {
         sessionVariable = VariableMgr.newSessionVariable();
         auditBuilder = new AuditBuilder();
         command = MysqlCommand.COM_SLEEP;
+        if (channel != null) {
+            remoteIP = mysqlChannel.getRemoteIp();
+        }
+    }
+
+    public long getStmtId() {
+        return stmtId;
+    }
+
+    public void setStmtId(long stmtId) {
+        this.stmtId = stmtId;
+    }
+
+    public String getRemoteIP() {
+        return remoteIP;
+    }
+
+    public void setRemoteIP(String remoteIP) {
+        this.remoteIP = remoteIP;
     }
 
     public AuditBuilder getAuditBuilder() {
@@ -119,7 +143,7 @@ public class ConnectContext {
     }
 
     public TResourceInfo toResourceCtx() {
-        return new TResourceInfo(user, sessionVariable.getResourceGroup());
+        return new TResourceInfo(qualifiedUser, sessionVariable.getResourceGroup());
     }
 
     public void setCatalog(Catalog catalog) {
@@ -130,12 +154,12 @@ public class ConnectContext {
         return catalog;
     }
 
-    public String getUser() {
-        return user;
+    public String getQualifiedUser() {
+        return qualifiedUser;
     }
 
-    public void setUser(String user) {
-        this.user = user;
+    public void setQualifiedUser(String qualifiedUser) {
+        this.qualifiedUser = qualifiedUser;
     }
 
     public SessionVariable getSessionVariable() {
@@ -252,12 +276,8 @@ public class ConnectContext {
 
     // kill operation with no protect.
     public void kill(boolean killConnection) {
-        if (isKilled) {
-            return;
-        }
-
         LOG.warn("kill timeout query, {}, kill connection: {}",
-                 mysqlChannel.getRemoteHostString(), killConnection);
+                 mysqlChannel.getRemoteHostPortString(), killConnection);
 
         if (killConnection) {
             isKilled = true;
@@ -283,7 +303,7 @@ public class ConnectContext {
             if (delta > sessionVariable.getWaitTimeoutS() * 1000) {
                 // Need kill this connection.
                 LOG.warn("kill wait timeout connection, remote: {}, wait timeout: {}",
-                         mysqlChannel.getRemoteHostString(), sessionVariable.getWaitTimeoutS());
+                         mysqlChannel.getRemoteHostPortString(), sessionVariable.getWaitTimeoutS());
 
                 killFlag = true;
                 killConnection = true;
@@ -291,7 +311,7 @@ public class ConnectContext {
         } else {
             if (delta > sessionVariable.getQueryTimeoutS() * 1000) {
                 LOG.warn("kill query timeout, remote: {}, query timeout: {}",
-                         mysqlChannel.getRemoteHostString(), sessionVariable.getQueryTimeoutS());
+                         mysqlChannel.getRemoteHostPortString(), sessionVariable.getQueryTimeoutS());
 
                 // Only kill
                 killFlag = true;
@@ -314,8 +334,8 @@ public class ConnectContext {
         public List<String>  toRow(long nowMs) {
             List<String> row = Lists.newArrayList();
             row.add("" + connectionId);
-            row.add(ClusterNamespace.getNameFromFullName(user));
-            row.add(mysqlChannel.getRemoteHostString());
+            row.add(ClusterNamespace.getNameFromFullName(qualifiedUser));
+            row.add(mysqlChannel.getRemoteHostPortString());
             row.add(clusterName);
             row.add(ClusterNamespace.getNameFromFullName(currentDb));
             row.add(command.toString());

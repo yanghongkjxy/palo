@@ -62,6 +62,7 @@ import com.baidu.palo.load.FailMsg.CancelType;
 import com.baidu.palo.load.LoadJob.EtlJobType;
 import com.baidu.palo.load.LoadJob.JobState;
 import com.baidu.palo.metric.MetricRepo;
+import com.baidu.palo.mysql.privilege.PrivPredicate;
 import com.baidu.palo.persist.ReplicaPersistInfo;
 import com.baidu.palo.qe.ConnectContext;
 import com.baidu.palo.system.Backend;
@@ -391,11 +392,27 @@ public class Load {
         addLoadJob(job, db);
     }
 
+    // This is a final step of all addLoadJob() methods
     private void addLoadJob(LoadJob job, Database db) throws DdlException {
         // check cluster capacity
         Catalog.getCurrentSystemInfo().checkClusterCapacity(db.getClusterName());
         // check db quota
         db.checkQuota();
+
+        // check if table is in restore process
+        db.readLock();
+        try {
+            for (Long tblId : job.getIdToTableLoadInfo().keySet()) {
+                Table tbl = db.getTable(tblId);
+                if (tbl != null && tbl.getType() == TableType.OLAP
+                        && ((OlapTable) tbl).getState() == OlapTableState.RESTORE) {
+                    throw new DdlException("Table " + tbl.getName() + " is in restore process. "
+                            + "Can not load into it");
+                }
+            }
+        } finally {
+            db.readUnlock();
+        }
 
         writeLock();
         try {
@@ -481,6 +498,7 @@ public class Load {
         for (DataDescription dataDescription : dataDescriptions) {
             // create source
             createSource(db, dataDescription, tableToPartitionSources, job.getDeleteFlag());
+            job.addTableName(dataDescription.getTableName());
         }
         for (Entry<Long, Map<Long, List<Source>>> tableEntry : tableToPartitionSources.entrySet()) {
             long tableId = tableEntry.getKey();
@@ -552,7 +570,7 @@ public class Load {
                 cluster = properties.get(LoadStmt.CLUSTER_PROPERTY);
             }
 
-            Pair<String, DppConfig> clusterInfo = Catalog.getInstance().getUserMgr().getClusterInfo(
+            Pair<String, DppConfig> clusterInfo = Catalog.getInstance().getAuth().getLoadClusterInfo(
                     stmt.getUser(), cluster);
             cluster = clusterInfo.first;
             DppConfig clusterConfig = clusterInfo.second;
@@ -789,6 +807,11 @@ public class Load {
         long dbId = job.getDbId();
         String label = job.getLabel();
         long timestamp = job.getTimestamp();
+
+        if (getAllUnfinishedLoadJob() > Config.max_unfinished_load_job) {
+            throw new DdlException(
+                    "Number of unfinished load jobs exceed the max number: " + Config.max_unfinished_load_job);
+        }
         
         // check label exist
         boolean checkMini = true;
@@ -849,6 +872,11 @@ public class Load {
                 // Impossible to be other state
                 Preconditions.checkNotNull(null, "Should not be here");
         }
+    }
+
+    private long getAllUnfinishedLoadJob() {
+        return idToPendingLoadJob.size() + idToEtlLoadJob.size() + idToLoadingLoadJob.size()
+            + idToQuorumFinishedLoadJob.size();
     }
 
     public void replayAddLoadJob(LoadJob job) throws DdlException {
@@ -1031,6 +1059,25 @@ public class Load {
             }
         } finally {
             readUnlock();
+        }
+
+        // check auth here, cause we need table info
+        Set<String> tableNames = job.getTableNames();
+        if (tableNames.isEmpty()) {
+            // forward compatibility
+            if (!Catalog.getCurrentCatalog().getAuth().checkDbPriv(ConnectContext.get(), dbName,
+                                                                   PrivPredicate.LOAD)) {
+                ErrorReport.reportDdlException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "CANCEL LOAD");
+            }
+        } else {
+            for (String tblName : tableNames) {
+                if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ConnectContext.get(), dbName, tblName,
+                                                                        PrivPredicate.LOAD)) {
+                    ErrorReport.reportDdlException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, "CANCEL LOAD",
+                                                   ConnectContext.get().getQualifiedUser(),
+                                                   ConnectContext.get().getRemoteIP(), tblName);
+                }
+            }
         }
 
         // cancel job
@@ -1244,8 +1291,8 @@ public class Load {
         }
     }
   
-    public LinkedList<List<Comparable>> getLoadJobInfosByDb(long dbId, String labelValue, boolean accurateMatch,
-                                                            Set<JobState> states, ArrayList<OrderByPair> orderByPairs) {
+    public LinkedList<List<Comparable>> getLoadJobInfosByDb(long dbId, String dbName, String labelValue,
+            boolean accurateMatch, Set<JobState> states, ArrayList<OrderByPair> orderByPairs) {
         LinkedList<List<Comparable>> loadJobInfos = new LinkedList<List<Comparable>>();
         readLock();
         try {
@@ -1254,11 +1301,13 @@ public class Load {
                 return loadJobInfos;
             }
 
+            long start = System.currentTimeMillis();
+            LOG.debug("begin to get load job info, size: {}", loadJobs.size());
             for (LoadJob loadJob : loadJobs) {
                 // filter first
                 String label = loadJob.getLabel();
                 JobState state = loadJob.getState();
-                
+
                 if (labelValue != null) {
                     if (accurateMatch) {
                         if (!label.equals(labelValue)) {
@@ -1270,13 +1319,35 @@ public class Load {
                         }
                     }
                 }
-                
+
                 if (states != null) {
                     if (!states.contains(state)) {
                         continue;
                     }
                 }
-                
+
+                // check auth
+                Set<String> tableNames = loadJob.getTableNames();
+                if (tableNames.isEmpty()) {
+                    // forward compatibility
+                    if (!Catalog.getCurrentCatalog().getAuth().checkDbPriv(ConnectContext.get(), dbName,
+                                                                           PrivPredicate.SHOW)) {
+                        continue;
+                    }
+                } else {
+                    boolean auth = true;
+                    for (String tblName : tableNames) {
+                        if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ConnectContext.get(), dbName,
+                                                                                tblName, PrivPredicate.SHOW)) {
+                            auth = false;
+                            break;
+                        }
+                    }
+                    if (!auth) {
+                        continue;
+                    }
+                }
+
                 List<Comparable> jobInfo = new ArrayList<Comparable>();
 
                 // jobId
@@ -1362,6 +1433,8 @@ public class Load {
 
                 loadJobInfos.add(jobInfo);
             } // end for loadJobs
+
+            LOG.debug("finished to get load job info, cost: {}", (System.currentTimeMillis() - start));
         } finally {
             readUnlock();
         }
@@ -1378,13 +1451,14 @@ public class Load {
         return loadJobInfos;
     }
 
-    public long getLatestJobIdByLabel(long dbId, String labelValue) {
+    public LoadJob getLatestJobIdByLabel(long dbId, String labelValue) {
+        LoadJob job = null;
         long jobId = 0;
         try {
             readLock();
             List<LoadJob> loadJobs = this.dbToLoadJobs.get(dbId);
             if (loadJobs == null) {
-                return 0;
+                return null;
             }
 
             for (LoadJob loadJob : loadJobs) {
@@ -1400,13 +1474,14 @@ public class Load {
 
                 if (currJobId > jobId) {
                     jobId = currJobId;
+                    job = loadJob;
                 }
             }
         } finally {
             readUnlock();
         }
 
-        return jobId;
+        return job;
     }
 
     public List<List<Comparable>> getLoadJobUnfinishedInfo(long jobId) {
@@ -1509,8 +1584,8 @@ public class Load {
     // Note: althrough this.loadErrorHubInfo is volatile, no need to lock.
     //       but editlog need be locked
     public void changeLoadErrorHubInfo(LoadErrorHub.Param info) {
+        writeLock();
         try {
-            writeLock();
             this.loadErrorHubInfo = info;
             Catalog.getInstance().getEditLog().logSetLoadErrorHub(info);
         } finally {
@@ -1520,6 +1595,7 @@ public class Load {
 
     public static class JobInfo {
         public String dbName;
+        public Set<String> tblNames = Sets.newHashSet();
         public String label;
         public String clusterName;
         public JobState state;
@@ -1537,6 +1613,7 @@ public class Load {
     // result saved in info
     public void getJobInfo(JobInfo info) throws DdlException {
         String fullDbName = ClusterNamespace.getFullName(info.clusterName, info.dbName);
+        info.dbName = fullDbName;
         Database db = Catalog.getInstance().getDb(fullDbName);
         if (db == null) {
             throw new DdlException("Unknown database(" + info.dbName + ")");
@@ -1553,6 +1630,11 @@ public class Load {
             }
             // only the last one should be running
             LoadJob job = loadJobs.get(loadJobs.size() - 1);
+
+            if (!job.getTableNames().isEmpty()) {
+                info.tblNames.addAll(job.getTableNames());
+            }
+            
             info.state = job.getState();
             if (info.state == JobState.QUORUM_FINISHED) {
                 info.state = JobState.FINISHED;
@@ -2887,6 +2969,12 @@ public class Load {
 
     public List<List<Comparable>> getDeleteInfosByDb(long dbId, boolean forUser) {
         LinkedList<List<Comparable>> infos = new LinkedList<List<Comparable>>();
+        Database db = Catalog.getInstance().getDb(dbId);
+        if (db == null) {
+            return infos;
+        }
+
+        String dbName = db.getFullName();
         readLock();
         try {
             List<DeleteInfo> deleteInfos = dbToDeleteInfos.get(dbId);
@@ -2895,6 +2983,12 @@ public class Load {
             }
 
             for (DeleteInfo deleteInfo : deleteInfos) {
+                if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ConnectContext.get(), dbName,
+                                                                        deleteInfo.getTableName(),
+                                                                        PrivPredicate.LOAD)) {
+                    continue;
+                }
+
                 List<Comparable> info = Lists.newArrayList();
                 if (!forUser) {
                     info.add(deleteInfo.getJobId());

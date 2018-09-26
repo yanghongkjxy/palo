@@ -20,8 +20,8 @@ import com.baidu.palo.common.io.Writable;
 
 import com.google.common.collect.Sets;
 
-import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -68,6 +68,10 @@ public class Tablet extends MetaObject implements Writable {
         isConsistent = true;
     }
     
+    public void setIdForRestore(long tabletId) {
+        this.id = tabletId;
+    }
+
     public long getId() {
         return this.id;
     }
@@ -111,13 +115,19 @@ public class Tablet extends MetaObject implements Writable {
         return delete || !hasBackend;
     }
 
-    public void addReplica(Replica replica) {
+    public void addReplica(Replica replica, boolean isRestore) {
         if (deleteRedundantReplica(replica.getBackendId(), replica.getVersion())) {
             replicas.add(replica);
-            Catalog.getCurrentInvertedIndex().addReplica(id, replica);
+            if (!isRestore) {
+                Catalog.getCurrentInvertedIndex().addReplica(id, replica);
+            }
         }
     }
     
+    public void addReplica(Replica replica) {
+        addReplica(replica, false);
+    }
+
     public List<Replica> getReplicas() {
         return this.replicas;
     }
@@ -131,19 +141,21 @@ public class Tablet extends MetaObject implements Writable {
     }
 
     // for query
-    public List<Replica> getQueryableReplicas(long committedVersion, long committedVersionHash) {
-        List<Replica> queryableReplicas = new LinkedList<Replica>();
+    public void getQueryableReplicas(List<Replica> allQuerableReplica, List<Replica> localReplicas,
+            long committedVersion, long committedVersionHash, long localBeId) {
         for (Replica replica : replicas) {
             ReplicaState state = replica.getState();
             if (state == ReplicaState.NORMAL || state == ReplicaState.SCHEMA_CHANGE) {
                 if (replica.getVersion() > committedVersion 
                         || (replica.getVersion() == committedVersion
                         && replica.getVersionHash() == committedVersionHash)) {
-                    queryableReplicas.add(replica);
+                    allQuerableReplica.add(replica);
+                    if (localBeId != -1 && replica.getBackendId() == localBeId) {
+                        localReplicas.add(replica);
+                    }
                 }
             }
         }
-        return queryableReplicas;
     }
 
     public Replica getReplicaById(long replicaId) {

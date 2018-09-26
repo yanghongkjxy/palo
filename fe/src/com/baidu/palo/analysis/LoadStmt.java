@@ -20,13 +20,12 @@
 
 package com.baidu.palo.analysis;
 
-import com.baidu.palo.catalog.AccessPrivilege;
 import com.baidu.palo.common.AnalysisException;
 import com.baidu.palo.common.DdlException;
-import com.baidu.palo.common.ErrorCode;
-import com.baidu.palo.common.ErrorReport;
 import com.baidu.palo.common.InternalException;
 import com.baidu.palo.common.util.PrintableMap;
+import com.baidu.palo.qe.ConnectContext;
+
 import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableSet;
@@ -190,20 +189,24 @@ public class LoadStmt extends DdlStmt {
             if (brokerDesc != null) {
                 dataDescription.setIsPullLoad(true);
             }
-            dataDescription.analyze();
+            dataDescription.analyze(label.getDbName());
         }
         
-        // check auth
-        user = analyzer.getUser();
-        if (!analyzer.getCatalog().getUserMgr().checkAccess(user, label.getDbName(), AccessPrivilege.READ_WRITE)) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_DB_ACCESS_DENIED, user, label.getDbName());
-        }
-
         try {
             checkProperties(properties);
         } catch (DdlException e) {
             throw new AnalysisException(e.getMessage());
         }
+
+        user = ConnectContext.get().getQualifiedUser();
+    }
+
+    @Override
+    public boolean needAuditEncryption() {
+        if (brokerDesc != null) {
+            return true;
+        }
+        return false;
     }
 
     @Override
@@ -222,6 +225,13 @@ public class LoadStmt extends DdlStmt {
             sb.append(cluster);
             sb.append("'");
         }
+
+        if (brokerDesc != null) {
+            sb.append("\n WITH BROKER '").append(brokerDesc.getName()).append("' (");
+            sb.append(new PrintableMap<String, String>(brokerDesc.getProperties(), "=", true, false, true));
+            sb.append(")");
+        }
+
         if (properties != null && !properties.isEmpty()) {
             sb.append("\nPROPERTIES (");
             sb.append(new PrintableMap<String, String>(properties, "=", true, false));

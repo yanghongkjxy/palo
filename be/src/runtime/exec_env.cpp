@@ -46,6 +46,7 @@
 #include "http/ev_http_server.h"
 #include "http/action/mini_load.h"
 #include "http/action/checksum_action.h"
+#include "http/action/compaction_action.h"
 #include "http/action/health_action.h"
 #include "http/action/reload_tablet_action.h"
 #include "http/action/snapshot_action.h"
@@ -60,6 +61,7 @@
 #include "runtime/etl_job_mgr.h"
 #include "runtime/load_path_mgr.h"
 #include "runtime/pull_load_task_mgr.h"
+#include "runtime/snapshot_loader.h"
 #include "util/pretty_printer.h"
 #include "util/palo_metrics.h"
 #include "util/brpc_stub_cache.h"
@@ -99,6 +101,7 @@ ExecEnv::ExecEnv() :
         _bfd_parser(BfdParser::create()),
         _pull_load_task_mgr(new PullLoadTaskMgr(config::pull_load_task_dir)),
         _broker_mgr(new BrokerMgr(this)),
+        _snapshot_loader(new SnapshotLoader(this)),
         _brpc_stub_cache(new BrpcStubCache()),
         _enable_webserver(true),
         _tz_database(TimezoneDatabase()) {
@@ -245,15 +248,19 @@ Status ExecEnv::start_webserver() {
 #ifndef BE_TEST
     // Register BE checksum action
     ChecksumAction* checksum_action = new ChecksumAction(this);
-    _ev_http_server->register_handler(HttpMethod::GET, "/api/checksum", checksum_action);
+    _ev_http_server->register_handler(HttpMethod::POST, "/api/checksum", checksum_action);
 
     // Register BE reload tablet action
     ReloadTabletAction* reload_tablet_action = new ReloadTabletAction(this);
-    _ev_http_server->register_handler(HttpMethod::GET, "/api/reload_tablet", reload_tablet_action);
+    _ev_http_server->register_handler(HttpMethod::POST, "/api/reload_tablet", reload_tablet_action);
 
     // Register BE snapshot action
     SnapshotAction* snapshot_action = new SnapshotAction(this);
-    _ev_http_server->register_handler(HttpMethod::GET, "/api/snapshot", snapshot_action);
+    _ev_http_server->register_handler(HttpMethod::POST, "/api/snapshot", snapshot_action);
+
+    // Register BE compaction action
+    CompactionAction* compaction_action = new CompactionAction();
+    _ev_http_server->register_handler(HttpMethod::POST, "/api/compaction", compaction_action);
 #endif
 
     RETURN_IF_ERROR(_ev_http_server->start());

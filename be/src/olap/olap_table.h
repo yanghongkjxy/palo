@@ -174,6 +174,9 @@ public:
     // Get table row_count and selectivity vector for SHOW_TABLE_INFO command
     OLAPStatus get_selectivities(std::vector<uint32_t>* selectivities);
 
+    // used for restore, merge the (0, to_version) in 'hdr'
+    OLAPStatus merge_header(const OLAPHeader& hdr, int to_version);
+
     // Get OLAPHeader write lock before call get_selectivities()
     void set_selectivities(const std::vector<uint32_t>& selectivities);
 
@@ -274,6 +277,10 @@ public:
     std::string construct_data_file_path(const Version& version,
                                          VersionHash version_hash,
                                          uint32_t segment) const;
+
+    // return the dir path of this tablet, include tablet id and schema hash
+    // eg: /path/to/data/0/100001/237480234/
+    std::string construct_dir_path() const;
 
     // For index file, suffix is "idx", for data file, suffix is "dat".
     static std::string construct_file_path(const std::string& header_path,
@@ -376,6 +383,10 @@ public:
 
     const FileVersionMessage* latest_version() const {
         return _header->get_latest_version();
+    }
+
+    const FileVersionMessage* base_version() const {
+        return _header->get_base_version();
     }
 
     // 在使用之前对header加锁
@@ -605,6 +616,31 @@ public:
     bool is_dropped() {
         return _is_dropped;
     }
+
+    bool can_do_compaction() {
+        // 如果table正在做schema change，则通过选路判断数据是否转换完成
+        // 如果选路成功，则转换完成，可以进行BE
+        // 如果选路失败，则转换未完成，不能进行BE
+        obtain_header_rdlock();
+        const FileVersionMessage* version = latest_version();
+        if (version == NULL) {
+            release_header_lock();
+            return false;
+        }
+
+        if (is_schema_changing()) {
+            Version test_version = Version(0, version->end_version());
+            std::vector<Version> path_versions;
+            if (OLAP_SUCCESS != select_versions_to_span(test_version, &path_versions)) {
+                release_header_lock();
+                return false;
+            }
+        }
+        release_header_lock();
+
+        return true;
+    }
+
 
 private:
     // used for hash-struct of hash_map<Version, OLAPIndex*>.

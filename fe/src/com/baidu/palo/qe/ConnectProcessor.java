@@ -15,6 +15,7 @@
 
 package com.baidu.palo.qe;
 
+import com.baidu.palo.analysis.StatementBase;
 import com.baidu.palo.catalog.Catalog;
 import com.baidu.palo.catalog.Column;
 import com.baidu.palo.catalog.Database;
@@ -89,13 +90,14 @@ public class ConnectProcessor {
         ctx.getState().setOk();
     }
 
-    private void auditAfterExec(String origStmt) {
+    private void auditAfterExec(String origStmt, StatementBase parsedStmt) {
         // slow query
         long elapseMs = System.currentTimeMillis() - ctx.getStartTime();
         // query state log
         ctx.getAuditBuilder().put("state", ctx.getState());
         ctx.getAuditBuilder().put("time", elapseMs);
         ctx.getAuditBuilder().put("returnRows", ctx.getReturnRows());
+        ctx.getAuditBuilder().put("stmt_id", ctx.getStmtId());
 
         if (ctx.getState().isQuery()) {
             MetricRepo.COUNTER_QUERY_ALL.increase(1L);
@@ -112,7 +114,11 @@ public class ConnectProcessor {
             ctx.getAuditBuilder().put("is_query", 0);
         }
         // We put origin query stmt at the end of audit log, for parsing the log more convenient.
-        ctx.getAuditBuilder().put("stmt", origStmt);
+        if (!ctx.getState().isQuery() && (parsedStmt != null && parsedStmt.needAuditEncryption())) {
+            ctx.getAuditBuilder().put("stmt", parsedStmt.toSql());
+        } else {
+            ctx.getAuditBuilder().put("stmt", origStmt);
+        }
 
         AuditLog.getQueryAudit().log(ctx.getAuditBuilder().toString());
 
@@ -142,19 +148,19 @@ public class ConnectProcessor {
             return;
         }
         ctx.getAuditBuilder().reset();
-        // replace '\n' to '\\\n' to make string in one line
-        ctx.getAuditBuilder().put("client", ctx.getMysqlChannel().getRemoteHostString());
-        ctx.getAuditBuilder().put("user", ctx.getUser());
+        ctx.getAuditBuilder().put("client", ctx.getMysqlChannel().getRemoteHostPortString());
+        ctx.getAuditBuilder().put("user", ctx.getQualifiedUser());
         ctx.getAuditBuilder().put("db", ctx.getDatabase());
 
         // execute this query.
         try {
             executor = new StmtExecutor(ctx, stmt);
+            ctx.setExecutor(executor);
             executor.execute();
             // set if this is a QueryStmt
             ctx.getState().setQuery(executor.isQueryStmt());
         } catch (DdlException e) {
-            LOG.warn("Process one query failed because DdlException: ", e);
+            LOG.warn("Process one query failed because DdlException.", e);
             ctx.getState().setError(e.getMessage());
         } catch (IOException e) {
             // Client failed.
@@ -168,7 +174,8 @@ public class ConnectProcessor {
         }
 
         // audit after exec
-        auditAfterExec(stmt.replace("\n", "\\n"));
+        // replace '\n' to '\\n' to make string in one line
+        auditAfterExec(stmt.replace("\n", " \\n"), executor.getParsedStmt());
     }
 
     // Get the column definitions of a table
@@ -301,7 +308,7 @@ public class ConnectProcessor {
 
     public TMasterOpResult proxyExecute(TMasterOpRequest request) {
         ctx.setDatabase(request.db);
-        ctx.setUser(request.user);
+        ctx.setQualifiedUser(request.user);
         ctx.setCatalog(Catalog.getInstance());
         ctx.getState().reset();
         if (request.isSetCluster()) {
@@ -315,6 +322,9 @@ public class ConnectProcessor {
         }
         if (request.isSetQueryTimeout()) {
             ctx.getSessionVariable().setQueryTimeoutS(request.getQueryTimeout());
+        }
+        if (request.isSetUser_ip()) {
+            ctx.setRemoteIP(request.getUser_ip());
         }
 
         ctx.setThreadLocalInfo();
@@ -357,7 +367,7 @@ public class ConnectProcessor {
         try {
             packetBuf = channel.fetchOnePacket();
             if (packetBuf == null) {
-                LOG.warn("Null packet received from network. remote: {}", channel.getRemoteHostString());
+                LOG.warn("Null packet received from network. remote: {}", channel.getRemoteHostPortString());
                 throw new IOException("Error happened when receiving packet.");
             }
         } catch (AsynchronousCloseException e) {
@@ -387,4 +397,3 @@ public class ConnectProcessor {
         }
     }
 }
-

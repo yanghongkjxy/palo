@@ -72,6 +72,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.thrift.TException;
@@ -181,7 +182,7 @@ public class Coordinator {
         this.returnedAllResults = false;
         this.queryOptions = context.getSessionVariable().toThrift();
         this.queryGlobals.setNow_string(DATE_FORMAT.format(new Date()));
-        this.tResourceInfo = new TResourceInfo(context.getUser(),
+        this.tResourceInfo = new TResourceInfo(context.getQualifiedUser(),
                 context.getSessionVariable().getResourceGroup());
         this.needReport = context.getSessionVariable().isReportSucc();
         this.clusterName = context.getClusterName();
@@ -408,7 +409,8 @@ public class Coordinator {
                     TStatusCode code = TStatusCode.INTERNAL_ERROR;
                     String errMsg = null;
                     try {
-                        PExecPlanFragmentResult result = pair.second.get(5, TimeUnit.SECONDS);
+                        PExecPlanFragmentResult result = pair.second.get(Config.remote_fragment_exec_timeout_ms,
+                                                                         TimeUnit.MILLISECONDS);
                         code = TStatusCode.findByValue(result.status.code);
                         if (result.status.msgs != null && !result.status.msgs.isEmpty()) {
                             errMsg = result.status.msgs.get(0);
@@ -426,19 +428,19 @@ public class Coordinator {
 
                     if (code != TStatusCode.OK) {
                         if (errMsg == null) {
-                            errMsg = "exec rpc error";
+                            errMsg = "exec rpc error. backend id: " + pair.first.systemBackendId;
                         }
                         queryStatus.setStatus(errMsg);
                         LOG.warn("exec plan fragment failed, errmsg={}, fragmentId={}, backend={}:{}",
-                                errMsg, fragment.getFragmentId(),
-                                pair.first.address.hostname, pair.first.address.port);
+                                 errMsg, fragment.getFragmentId(),
+                                 pair.first.address.hostname, pair.first.address.port);
                         cancelInternal();
                         switch (code) {
                             case TIMEOUT:
-                                throw new InternalException("query timeout");
+                                throw new InternalException("query timeout. backend id: " + pair.first.systemBackendId);
                             case THRIFT_RPC_ERROR:
                                 SimpleScheduler.updateBlacklistBackends(pair.first.systemBackendId);
-                                throw new RpcException("rpc failed");
+                                throw new RpcException("rpc failed. backend id: " + pair.first.systemBackendId);
                             default:
                                 throw new InternalException(errMsg);
                         }
@@ -508,8 +510,8 @@ public class Coordinator {
     }
 
     void updateStatus(Status status) {
+        lock.lock();
         try {
-            lock.lock();
             // The query is done and we are just waiting for remote fragments to clean up.
             // Ignore their cancelled updates.
             if (returnedAllResults && status.isCancelled()) {
@@ -531,7 +533,6 @@ public class Coordinator {
         } finally {
             lock.unlock();
         }
-
     }
 
     TResultBatch getNext() throws Exception {
@@ -539,7 +540,7 @@ public class Coordinator {
             throw new InternalException("There is no receiver.");
         }
 
-        TResultBatch  resultBatch;
+        TResultBatch resultBatch;
         Status status = new Status();
 
         resultBatch = receiver.getNext(status);
@@ -559,7 +560,6 @@ public class Coordinator {
             if (copyStatus.isRpcError()) {
                 throw new RpcException(copyStatus.getErrorMsg());
             } else {
-
                 String errMsg = copyStatus.getErrorMsg();
                 LOG.warn("query failed: {}", errMsg);
 
@@ -1211,7 +1211,7 @@ public class Coordinator {
             // add scan range
             TScanRangeParams scanRangeParams = new TScanRangeParams();
             scanRangeParams.scan_range = scanRangeLocations.scan_range;
-            // Volume is is optional, so we need to set the value and the is-set bit
+            // Volume is optional, so we need to set the value and the is-set bit
             scanRangeParams.setVolume_id(minLocation.volume_id);
             scanRangeParamsList.add(scanRangeParams);
         }
@@ -1364,6 +1364,14 @@ public class Coordinator {
 
         public void unlock() {
             lock.unlock();
+        }
+
+        public int getInstanceId() {
+            return instanceId;
+        }
+
+        public PlanFragmentId getfragmentId() {
+            return fragmentId;
         }
 
         public BackendExecState(PlanFragmentId fragmentId, int instanceId, int profileFragmentId,
@@ -1539,4 +1547,25 @@ public class Coordinator {
         }
     }
 
+    // consistent with EXPLAIN's fragment index
+    public List<QueryStatisticsItem.FragmentInstanceInfo> getFragmentInstanceInfos() {
+        final List<QueryStatisticsItem.FragmentInstanceInfo> result =
+                Lists.newArrayList();
+        for (int index = 0; index < fragments.size(); index++) {
+            for (Map.Entry<TUniqueId, BackendExecState> entry: backendExecStateMap.entrySet()) {
+                final BackendExecState backendExecState = entry.getValue();
+                if (fragments.get(index).getFragmentId() != backendExecState.getfragmentId()) {
+                    continue;
+                }
+                final QueryStatisticsItem.FragmentInstanceInfo info
+                        = new QueryStatisticsItem.FragmentInstanceInfo.Builder()
+                        .instanceId(entry.getValue().getFragmentInstanceId())
+                        .fragmentId(String.valueOf(index))
+                        .address(backendExecState.getBackendAddress())
+                        .build();
+                result.add(info);
+            }
+        }
+        return result;
+    }
 }

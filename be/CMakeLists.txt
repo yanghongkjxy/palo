@@ -252,14 +252,13 @@ execute_process(
 #  -fno-omit-frame-pointers: Keep frame pointer for functions in register
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wall -Wno-sign-compare -Wno-unknown-pragmas -pthread")
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -fno-strict-aliasing -fno-omit-frame-pointer")
-set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -std=gnu++11")
+set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -std=gnu++11 -D__STDC_FORMAT_MACROS")
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-deprecated -Wno-vla")
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -DBOOST_DATE_TIME_POSIX_TIME_STD_CONFIG")
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -DBOOST_SYSTEM_NO_DEPRECATED")
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -msse4.2")
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -DLLVM_ON_UNIX")
 
-# for bprc
 if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 7.0)
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -faligned-new")
 endif()
@@ -304,7 +303,7 @@ SET(CXX_FLAGS_TSAN "${CXX_GCC_FLAGS} -O1 -ggdb3 -fsanitize=thread -DTHREAD_SANIT
 # Set compile flags based on the build type.
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG")
     SET(CMAKE_CXX_FLAGS ${CXX_FLAGS_DEBUG})
-elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
+elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE" OR "${CMAKE_BUILD_TYPE}" STREQUAL "BCC")
     SET(CMAKE_CXX_FLAGS ${CXX_FLAGS_RELEASE})
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "ASAN")
     SET(CMAKE_CXX_FLAGS "${CXX_FLAGS_ASAN}")
@@ -350,7 +349,6 @@ endif()
 # optimizations will be less effective if the initial code is also optimized.
 set(CLANG_IR_CXX_FLAGS "-gcc-toolchain" ${GCC_HOME})
 set(CLANG_IR_CXX_FLAGS ${CLANG_IR_CXX_FLAGS} "-std=gnu++11" "-c" "-emit-llvm" "-D__STDC_CONSTANT_MACROS" "-D__STDC_FORMAT_MACROS" "-D__STDC_LIMIT_MACROS" "-DIR_COMPILE" "-DNDEBUG" "-DHAVE_INTTYPES_H" "-DHAVE_NETINET_IN_H" "-DBOOST_DATE_TIME_POSIX_TIME_STD_CONFIG" "-D__GLIBCXX_BITSIZE_INT_N_0=128" "-D__GLIBCXX_TYPE_INT_N_0=__int128" "-U_GLIBCXX_USE_FLOAT128" "-DLLVM_ON_UNIX")
-
 if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 7.0)
     # for support float128
     set(CLANG_IR_CXX_FLAGS ${CLANG_IR_CXX_FLAGS} "-D__STRICT_ANSI__")
@@ -487,8 +485,14 @@ set(PALO_LINK_LIBS ${PALO_LINK_LIBS}
     -static-libgcc
 )
 
+if ("${CMAKE_BUILD_TYPE}" STREQUAL "BCC")
+    set(PALO_LINK_LIBS ${PALO_LINK_LIBS}
+        -Wl,--dynamic-linker=/lib64/ld-linux-x86-64.so.2
+    )
+endif()
+
 # Add sanitize static link flags or tcmalloc
-if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG" OR "${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
+if ("${CMAKE_BUILD_TYPE}" STREQUAL "DEBUG" OR "${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE" OR "${CMAKE_BUILD_TYPE}" STREQUAL "BCC")
     set(PALO_LINK_LIBS ${PALO_LINK_LIBS} tcmalloc)
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "ASAN")
     set(PALO_LINK_LIBS ${PALO_LINK_LIBS} -static-libasan)
@@ -503,7 +507,7 @@ else()
 endif()
 
 set(PALO_LINK_LIBS ${PALO_LINK_LIBS}
-    -lrt -lbfd -liberty -lc -lm -ldl -pthread -lz
+    -lrt -lbfd -liberty -lc -lm -ldl -pthread
 )
 
 # Set libraries for test

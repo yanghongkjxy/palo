@@ -20,7 +20,6 @@
 
 package com.baidu.palo.analysis;
 
-import com.baidu.palo.catalog.AccessPrivilege;
 import com.baidu.palo.catalog.AggregateType;
 import com.baidu.palo.catalog.Catalog;
 import com.baidu.palo.catalog.Column;
@@ -37,6 +36,8 @@ import com.baidu.palo.common.io.Text;
 import com.baidu.palo.common.io.Writable;
 import com.baidu.palo.common.util.KuduUtil;
 import com.baidu.palo.common.util.PrintableMap;
+import com.baidu.palo.mysql.privilege.PrivPredicate;
+import com.baidu.palo.qe.ConnectContext;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
@@ -191,10 +192,9 @@ public class CreateTableStmt extends DdlStmt implements Writable {
         tableName.analyze(analyzer);
         FeNameFormat.checkTableName(tableName.getTbl());
 
-        // check authenticate
-        if (!analyzer.getCatalog().getUserMgr()
-                .checkAccess(analyzer.getUser(), tableName.getDb(), AccessPrivilege.READ_WRITE)) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_DB_ACCESS_DENIED, analyzer.getUser(), tableName.getDb());
+        if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ConnectContext.get(), tableName.getDb(),
+                                                                tableName.getTbl(), PrivPredicate.CREATE)) {
+            ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "CREATE");
         }
 
         analyzeEngineName();
@@ -358,7 +358,7 @@ public class CreateTableStmt extends DdlStmt implements Writable {
             if (idx != 0) {
                 sb.append(",\n");
             }
-            sb.append(column.toSql());
+            sb.append("  ").append(column.toSql());
             idx++;
         }
         sb.append("\n)");
@@ -378,15 +378,19 @@ public class CreateTableStmt extends DdlStmt implements Writable {
             sb.append("\n").append(distributionDesc.toSql());
         }
 
+        // properties may contains password and other sensitive information,
+        // so do not print properties.
+        // This toSql() method is only used for log, user can see detail info by using show create table stmt,
+        // which is implemented in Catalog.getDdlStmt()
         if (properties != null && !properties.isEmpty()) {
             sb.append("\nPROPERTIES (");
-            sb.append(new PrintableMap<String, String>(properties, " = ", true, true));
+            sb.append(new PrintableMap<String, String>(properties, " = ", true, true, true));
             sb.append(")");
         }
 
         if (extProperties != null && !extProperties.isEmpty()) {
             sb.append("\n").append(engineName.toUpperCase()).append(" PROPERTIES (");
-            sb.append(new PrintableMap<String, String>(properties, " = ", true, true));
+            sb.append(new PrintableMap<String, String>(extProperties, " = ", true, true, true));
             sb.append(")");
         }
 
@@ -396,6 +400,14 @@ public class CreateTableStmt extends DdlStmt implements Writable {
     @Override
     public String toString() {
         return toSql();
+    }
+
+    @Override
+    public boolean needAuditEncryption() {
+        if (!engineName.equals("olap")) {
+            return true;
+        }
+        return false;
     }
 
     @Override

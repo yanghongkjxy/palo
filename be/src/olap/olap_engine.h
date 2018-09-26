@@ -19,6 +19,7 @@
 #include <ctime>
 #include <list>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -66,11 +67,13 @@ public:
                             const SmartOLAPTable ref_olap_table);
 
     // Add a table pointer to OLAPEngine
+    // If force, drop the existing table add this new one
     //
     // Return OLAP_SUCCESS, if run ok
     //        OLAP_ERR_TABLE_INSERT_DUPLICATION_ERROR, if find duplication
     //        OLAP_ERR_NOT_INITED, if not inited
-    OLAPStatus add_table(TTabletId tablet_id, SchemaHash schema_hash, OLAPTable* table);
+    OLAPStatus add_table(TTabletId tablet_id, SchemaHash schema_hash,
+            OLAPTable* table, bool force = false);
 
     // Add empty data for OLAPTable
     //
@@ -80,14 +83,16 @@ public:
             Version version, VersionHash version_hash);
 
     // Drop a table by description
-    //
+    // If set keep_files == true, files will NOT be deleted when deconstruction.
     // Return OLAP_SUCCESS, if run ok
     //        OLAP_ERR_TABLE_DELETE_NOEXIST_ERROR, if table not exist
     //        OLAP_ERR_NOT_INITED, if not inited
-    OLAPStatus drop_table(TTabletId tablet_id, SchemaHash schema_hash);
+    OLAPStatus drop_table(
+            TTabletId tablet_id, SchemaHash schema_hash, bool keep_files = false);
 
     // Drop table directly with check schema change info.
-    OLAPStatus _drop_table_directly(TTabletId tablet_id, TSchemaHash schema_hash);
+    OLAPStatus _drop_table_directly(
+            TTabletId tablet_id, TSchemaHash schema_hash, bool keep_files = false);
 
     OLAPStatus drop_tables_on_error_root_path(const std::vector<TableInfo>& table_info_vec);
 
@@ -124,7 +129,8 @@ public:
 
     OLAPStatus load_one_tablet(TTabletId tablet_id,
                                SchemaHash schema_hash,
-                               const std::string& schema_hash_path);
+                               const std::string& schema_hash_path,
+                               bool force = false);
 
     Cache* index_stream_lru_cache() {
         return _index_stream_lru_cache;
@@ -137,6 +143,15 @@ public:
     // 清理trash和snapshot文件，返回清理后的磁盘使用量
     OLAPStatus start_trash_sweep(double *usage);
 
+    void add_tablet_to_base_compaction_queue(const TableInfo& tablet_info) {
+        std::lock_guard<std::mutex> l(_base_compaction_queue_lock);
+        _base_compaction_tablet_queue.push(tablet_info);
+    }
+
+    void add_tablet_to_cumulative_compaction_queue(const TableInfo& tablet_info) {
+        std::lock_guard<std::mutex> l(_cumulative_compaction_queue_lock);
+        _cumulative_compaction_tablet_queue.push(tablet_info);
+    }
 private:
     struct TableInstances {
         MutexLock schema_change_lock;
@@ -192,8 +207,6 @@ private:
 
     OLAPStatus _check_existed_or_else_create_dir(const std::string& path);
 
-    bool _can_do_compaction(SmartOLAPTable table);
-
     void _select_candidate();
 
     void _cancel_unfinished_schema_change();
@@ -209,7 +222,11 @@ private:
     Cache* _file_descriptor_lru_cache;
     Cache* _index_stream_lru_cache;
     uint32_t _max_base_compaction_task_per_disk;
+    std::queue<TableInfo> _base_compaction_tablet_queue;
+    std::mutex _base_compaction_queue_lock;
     uint32_t _max_cumulative_compaction_task_per_disk;
+    std::queue<TableInfo> _cumulative_compaction_tablet_queue;
+    std::mutex _cumulative_compaction_queue_lock;
 
     MutexLock _fs_task_mutex;
     file_system_task_count_t _fs_base_compaction_task_num_map;

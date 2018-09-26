@@ -82,6 +82,13 @@ public class Config extends ConfigBase {
      * 2. Safe (RAID)
      */
     @ConfField public static String meta_dir = System.getenv("PALO_HOME") + "/palo-meta";
+    
+    /*
+     * temp dir is used to save intermediate results of some process, such as backup and restore process.
+     * file in this dir will be cleaned after these process is finished.
+     */
+    @ConfField public static String tmp_dir = System.getenv("PALO_HOME") + "/temp_dir";
+    
     /*
      * Edit log type.
      * BDB: write log to bdbje
@@ -97,7 +104,7 @@ public class Config extends ConfigBase {
     /*
      * Master FE will save image every *edit_log_roll_num* meta journals.
      */
-    @ConfField public static int edit_log_roll_num = 100000;
+    @ConfField public static int edit_log_roll_num = 50000;
     /*
      * Non-master FE will stop offering service
      * if meta data delay gap exceeds *meta_delay_toleration_second*
@@ -503,6 +510,9 @@ public class Config extends ConfigBase {
     
     // Set runtime locale when exec some cmds
     @ConfField public static String locale = "zh_CN.UTF-8";
+
+    // default timeout of backup job
+    @ConfField public static int backup_job_default_timeout_ms = 86400 * 1000; // 1 day
     
     /*
      * storage_high_watermark_usage_percent limit the max capacity usage percent of a Backend storage path.
@@ -512,4 +522,52 @@ public class Config extends ConfigBase {
      */
     @ConfField public static double storage_high_watermark_usage_percent = 0.85;
     @ConfField public static double storage_min_left_capacity_bytes = 1000 * 1024 * 1024; // 1G
+
+    // May be necessary to modify the following BRPC configurations in high concurrency scenarios. 
+    // The number of concurrent requests BRPC can processed
+    @ConfField public static int brpc_number_of_concurrent_requests_processed = 4096;
+
+    // BRPC idle wait time (ms)
+    @ConfField public static int brpc_idle_wait_max_time = 10000;
+    
+    /*
+     * if set to false, auth check will be disable, in case some goes wrong with the new privilege system. 
+     */
+    @ConfField public static boolean enable_auth_check = true;
+    
+    /*
+     * Max bytes a broker scanner can process in one broker load job.
+     * Commonly, each Backends has one broker scanner.
+     */
+    @ConfField public static long max_bytes_per_broker_scanner = 3 * 1024 * 1024 * 1024L;  // 3G
+    
+    /*
+     * Max number of load jobs, include PENDING、ETL、LOADING、QUORUM_FINISHED.
+     * If exceed this number, load job is not allowed to be submitted.
+     */
+    @ConfField public static long max_unfinished_load_job = 1000;
+    
+    /*
+     * If set to true, Planner will try to select replica of tablet on same host as this Frontend.
+     * This may reduce network transmission in following case:
+     * 1. N hosts with N Backends and N Frontends deployed.
+     * 2. The data has N replicas.
+     * 3. High concurrency queries are sent to all Frontends evenly
+     * In this case, all Frontends can only use local replicas to do the query.
+     */
+    @ConfField public static boolean enable_local_replica_selection = false;
+    
+    /*
+     * The timeout of executing async remote fragment.
+     * In normal case, the async remote fragment will be executed in a short time. If system are under high load
+     * condition，try to set this timeout longer.
+     */
+    @ConfField public static long remote_fragment_exec_timeout_ms = 5000;   // 5 sec
+    
+    /*
+     * The number of query retries. 
+     * A query may retry if we encounter RPC exception and no result has been sent to user.
+     * You may reduce this number to void Avalanche disaster.
+     */
+    @ConfField public static int max_query_retry_time = 3;
 }

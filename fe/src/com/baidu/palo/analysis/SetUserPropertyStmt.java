@@ -23,8 +23,12 @@ package com.baidu.palo.analysis;
 import com.baidu.palo.cluster.ClusterNamespace;
 import com.baidu.palo.common.AnalysisException;
 import com.baidu.palo.common.InternalException;
+import com.baidu.palo.common.Pair;
+import com.baidu.palo.mysql.privilege.PaloAuth;
+import com.baidu.palo.qe.ConnectContext;
 
 import com.google.common.base.Strings;
+import com.google.common.collect.Lists;
 
 import java.util.List;
 
@@ -45,16 +49,26 @@ public class SetUserPropertyStmt extends DdlStmt {
         return propertyList;
     }
 
+    // using List because we need retain the origin property order
+    public List<Pair<String, String>> getPropertyPairList() {
+        List<Pair<String, String>> list = Lists.newArrayList();
+        for (SetVar var : propertyList) {
+            list.add(Pair.create(((SetUserPropertyVar) var).getPropertyKey(),
+                                 ((SetUserPropertyVar) var).getPropertyValue()));
+        }
+        return list;
+    }
+
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException, InternalException {
         super.analyze(analyzer);
         if (Strings.isNullOrEmpty(user)) {
             // If param 'user' is not set, use the login user name.
             // The login user name is full-qualified with cluster name.
-            user = analyzer.getUser();
+            user = ConnectContext.get().getQualifiedUser();
         } else {
             // If param 'user' is set, check if it need to be full-qualified
-            if (!analyzer.getCatalog().getUserMgr().isAdmin(user)) {
+            if (!user.equals(PaloAuth.ROOT_USER) && !user.equals(PaloAuth.ADMIN_USER)) {
                 user = ClusterNamespace.getFullName(getClusterName(), user);
             }
         }
@@ -62,8 +76,10 @@ public class SetUserPropertyStmt extends DdlStmt {
         if (propertyList == null || propertyList.isEmpty()) {
             throw new AnalysisException("Empty properties");
         }
+
+        boolean isSelf = user.equals(ConnectContext.get().getQualifiedUser());
         for (SetVar var : propertyList) {
-            ((SetUserPropertyVar) var).analyze(analyzer, user);
+            ((SetUserPropertyVar) var).analyze(analyzer, isSelf);
         }
     }
 
